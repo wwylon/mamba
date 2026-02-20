@@ -225,42 +225,76 @@ if not SKIP_CUDA_BUILD:
             + cc_flag,
         }
     else:
-        extra_compile_args = {
-            "cxx": ["-O3", "-std=c++17"],
-            "nvcc": append_nvcc_threads(
-                [
-                    "-O3",
-                    "-std=c++17",
-                    "-U__CUDA_NO_HALF_OPERATORS__",
-                    "-U__CUDA_NO_HALF_CONVERSIONS__",
-                    "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-                    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                    "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                    "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-                    "--expt-relaxed-constexpr",
-                    "--expt-extended-lambda",
-                    "--use_fast_math",
-                    "--ptxas-options=-v",
-                    "-lineinfo",
-                ]
-                + cc_flag
-            ),
-        }
+        if sys.platform == "win32":
+            extra_compile_args = {
+                "cxx": ["/O2", "/std:c++17", "/Zc:__cplusplus"],
+                "nvcc": append_nvcc_threads(
+                    [
+                        "-O3",
+                        "-std=c++17",
+                        "-U__CUDA_NO_HALF_OPERATORS__",
+                        "-U__CUDA_NO_HALF_CONVERSIONS__",
+                        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+                        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+                        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+                        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+                        "--expt-relaxed-constexpr",
+                        "--expt-extended-lambda",
+                        "--use_fast_math",
+                        "--ptxas-options=-v",
+                        "-lineinfo",
+                        "-Xcompiler", "/wd4819",
+                        "-Xcompiler", "/wd4251",
+                        "-Xcompiler", "/wd4244",
+                        "-Xcompiler", "/wd4267",
+                        "-Xcompiler", "/wd4275",
+                        "-Xcompiler", "/wd4018",
+                        "-Xcompiler", "/wd4190",
+                        "-Xcompiler", "/wd4624",
+                        "-Xcompiler", "/wd4067",
+                        "-Xcompiler", "/wd4068",
+                        "-Xcompiler", "/wd4996",
+                    ]
+                    + cc_flag
+                ),
+            }
+        else:
+            extra_compile_args = {
+                "cxx": ["-O3", "-std=c++17"],
+                "nvcc": append_nvcc_threads(
+                    [
+                        "-O3",
+                        "-std=c++17",
+                        "-U__CUDA_NO_HALF_OPERATORS__",
+                        "-U__CUDA_NO_HALF_CONVERSIONS__",
+                        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+                        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+                        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+                        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+                        "--expt-relaxed-constexpr",
+                        "--expt-extended-lambda",
+                        "--use_fast_math",
+                        "--ptxas-options=-v",
+                        "-lineinfo",
+                    ]
+                    + cc_flag
+                ),
+            }
 
     ext_modules.append(
         CUDAExtension(
             name="selective_scan_cuda",
             sources=[
-                "csrc/selective_scan/selective_scan.cpp",
-                "csrc/selective_scan/selective_scan_fwd_fp32.cu",
-                "csrc/selective_scan/selective_scan_fwd_fp16.cu",
-                "csrc/selective_scan/selective_scan_fwd_bf16.cu",
-                "csrc/selective_scan/selective_scan_bwd_fp32_real.cu",
-                "csrc/selective_scan/selective_scan_bwd_fp32_complex.cu",
-                "csrc/selective_scan/selective_scan_bwd_fp16_real.cu",
-                "csrc/selective_scan/selective_scan_bwd_fp16_complex.cu",
-                "csrc/selective_scan/selective_scan_bwd_bf16_real.cu",
-                "csrc/selective_scan/selective_scan_bwd_bf16_complex.cu",
+                str(Path("csrc") / "selective_scan" / "selective_scan.cpp"),
+                str(Path("csrc") / "selective_scan" / "selective_scan_fwd_fp32.cu"),
+                str(Path("csrc") / "selective_scan" / "selective_scan_fwd_fp16.cu"),
+                str(Path("csrc") / "selective_scan" / "selective_scan_fwd_bf16.cu"),
+                str(Path("csrc") / "selective_scan" / "selective_scan_bwd_fp32_real.cu"),
+                str(Path("csrc") / "selective_scan" / "selective_scan_bwd_fp32_complex.cu"),
+                str(Path("csrc") / "selective_scan" / "selective_scan_bwd_fp16_real.cu"),
+                str(Path("csrc") / "selective_scan" / "selective_scan_bwd_fp16_complex.cu"),
+                str(Path("csrc") / "selective_scan" / "selective_scan_bwd_bf16_real.cu"),
+                str(Path("csrc") / "selective_scan" / "selective_scan_bwd_bf16_complex.cu"),
             ],
             extra_compile_args=extra_compile_args,
             include_dirs=[Path(this_dir) / "csrc" / "selective_scan"],

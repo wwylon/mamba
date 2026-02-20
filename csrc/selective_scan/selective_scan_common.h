@@ -4,6 +4,15 @@
 
 #pragma once
 
+// Ensure M_LOG2E and other math constants are defined on MSVC
+#ifndef _USE_MATH_DEFINES
+#define _USE_MATH_DEFINES
+#endif
+#include <cmath>
+#ifndef M_LOG2E
+#define M_LOG2E 1.4426950408889634
+#endif
+
 #ifndef USE_ROCM
     #include <cuda_bf16.h>
 #else

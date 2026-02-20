@@ -20,6 +20,8 @@
 #include "selective_scan.h"
 #include "selective_scan_common.h"
 #include "static_switch.h"
+#include <type_traits>
+#include <iostream>
 
 template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
          bool kIsVariableB_, bool kIsVariableC_,
@@ -307,44 +309,63 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     }
 }
 
+template<int kNThreads, int kNItems, int kNRows, bool kIsEvenLen, bool kIsVariableB, bool kIsVariableC, bool kHasZ, typename input_t, typename weight_t>
+void selective_scan_fwd_launch_inner(SSMParamsBase &params, cudaStream_t stream) {
+    using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, input_t, weight_t>;
+    constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
+    dim3 grid(params.batch, params.dim / kNRows);
+    auto kernel = &selective_scan_fwd_kernel<Ktraits>;
+    if (kSmemSize >= 48 * 1024) {
+        #ifndef USE_ROCM
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+        #else
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+            std::cerr << "Warning (selective_scan_fwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
+        #endif
+    }
+    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 template<int kNThreads, int kNItems, typename input_t, typename weight_t>
 void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
-    // Only kNRows == 1 is tested for now, which ofc doesn't differ from previously when we had each block
-    // processing 1 row.
+    // Only kNRows == 1 is tested for now
     constexpr int kNRows = 1;
-    BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
-        BOOL_SWITCH(params.is_variable_B, kIsVariableB, [&] {
-            BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
-                BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
-                    using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, input_t, weight_t>;
-                    
-                    constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
-                    dim3 grid(params.batch, params.dim / kNRows);
-
-                    // Had to change this substantially since potentially the hip 
-                    // interface for setting kernel launch attributes is slightly different from 
-                    // cuda's. In particualar, it seems to expect a plain const void * pointer.
-
-                    auto kernel = &selective_scan_fwd_kernel<Ktraits>;
-
-                    
-                    if (kSmemSize >= 48 * 1024) {
-                        #ifndef USE_ROCM
-                        C10_CUDA_CHECK(cudaFuncSetAttribute(
-                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                        #else
-                        C10_CUDA_CHECK(cudaFuncSetAttribute(
-                            (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                            std::cerr << "Warning (selective_scan_fwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
-                        #endif
-                    }
-
-                    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-                    C10_CUDA_KERNEL_LAUNCH_CHECK();
-                });
-            });
-        });
-    });
+    auto dispatch = [&](auto kIsEvenLen_, auto kIsVariableB_, auto kIsVariableC_, auto kHasZ_) {
+        constexpr bool kIsEvenLen = decltype(kIsEvenLen_)::value;
+        constexpr bool kIsVariableB = decltype(kIsVariableB_)::value;
+        constexpr bool kIsVariableC = decltype(kIsVariableC_)::value;
+        constexpr bool kHasZ = decltype(kHasZ_)::value;
+        selective_scan_fwd_launch_inner<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, input_t, weight_t>(params, stream);
+    };
+    auto dispatch_hasZ = [&](auto kIsEvenLen_, auto kIsVariableB_, auto kIsVariableC_) {
+        if (params.z_ptr != nullptr) {
+            dispatch(kIsEvenLen_, kIsVariableB_, kIsVariableC_, std::true_type{});
+        } else {
+            dispatch(kIsEvenLen_, kIsVariableB_, kIsVariableC_, std::false_type{});
+        }
+    };
+    auto dispatch_variableC = [&](auto kIsEvenLen_, auto kIsVariableB_) {
+        if (params.is_variable_C) {
+            dispatch_hasZ(kIsEvenLen_, kIsVariableB_, std::true_type{});
+        } else {
+            dispatch_hasZ(kIsEvenLen_, kIsVariableB_, std::false_type{});
+        }
+    };
+    auto dispatch_variableB = [&](auto kIsEvenLen_) {
+        if (params.is_variable_B) {
+            dispatch_variableC(kIsEvenLen_, std::true_type{});
+        } else {
+            dispatch_variableC(kIsEvenLen_, std::false_type{});
+        }
+    };
+    if (params.seqlen % (kNThreads * kNItems) == 0) {
+        dispatch_variableB(std::true_type{});
+    } else {
+        dispatch_variableB(std::false_type{});
+    }
 }
 
 template<typename input_t, typename weight_t>

@@ -23,6 +23,7 @@
 #include "selective_scan_common.h"
 #include "reverse_scan.cuh"
 #include "static_switch.h"
+#include <type_traits>
 
 template<typename scalar_t> __device__ __forceinline__ scalar_t conj(scalar_t x);
 template<> __device__ __forceinline__ float conj<float>(float x) { return x; }
@@ -494,42 +495,70 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     }
 }
 
+template<int kNThreads, int kNItems, bool kIsEvenLen, bool kIsVariableB, bool kIsVariableC, bool kDeltaSoftplus, bool kHasZ, typename input_t, typename weight_t>
+void selective_scan_bwd_launch_inner(SSMParamsBwd &params, cudaStream_t stream) {
+    using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
+    constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
+    dim3 grid(params.batch, params.dim);
+    auto kernel = &selective_scan_bwd_kernel<Ktraits>;
+    if (kSmemSize >= 48 * 1024) {
+        #ifndef USE_ROCM
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+        #else
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+            std::cerr << "Warning (selective_scan_bwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
+        #endif
+    }
+    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 template<int kNThreads, int kNItems, typename input_t, typename weight_t>
 void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
-    BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
-        BOOL_SWITCH(params.is_variable_B, kIsVariableB, [&] {
-            BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
-                BOOL_SWITCH(params.delta_softplus, kDeltaSoftplus, [&] {
-                    BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
-                        using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
-                        // using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, true, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
-                        // TODO: check this
-                        constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
-
-                        dim3 grid(params.batch, params.dim);
-                        
-                        auto kernel = &selective_scan_bwd_kernel<Ktraits>;
-
-                        if (kSmemSize >= 48 * 1024) {
-
-                            #ifndef USE_ROCM
-                            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                            #else
-                            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                                (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                            std::cerr << "Warning (selective_scan_bwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
-                            #endif
-
-                        }
-
-                        kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-                        C10_CUDA_KERNEL_LAUNCH_CHECK();
-                    });
-                });
-            });
-        });
-    });
+    // Manually dispatch to avoid deeply nested BOOL_SWITCH macros that break MSVC/NVCC
+    auto dispatch = [&](auto kIsEvenLen_, auto kIsVariableB_, auto kIsVariableC_, auto kDeltaSoftplus_, auto kHasZ_) {
+        constexpr bool kIsEvenLen = decltype(kIsEvenLen_)::value;
+        constexpr bool kIsVariableB = decltype(kIsVariableB_)::value;
+        constexpr bool kIsVariableC = decltype(kIsVariableC_)::value;
+        constexpr bool kDeltaSoftplus = decltype(kDeltaSoftplus_)::value;
+        constexpr bool kHasZ = decltype(kHasZ_)::value;
+        selective_scan_bwd_launch_inner<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>(params, stream);
+    };
+    auto dispatch_hasZ = [&](auto kIsEvenLen_, auto kIsVariableB_, auto kIsVariableC_, auto kDeltaSoftplus_) {
+        if (params.z_ptr != nullptr) {
+            dispatch(kIsEvenLen_, kIsVariableB_, kIsVariableC_, kDeltaSoftplus_, std::true_type{});
+        } else {
+            dispatch(kIsEvenLen_, kIsVariableB_, kIsVariableC_, kDeltaSoftplus_, std::false_type{});
+        }
+    };
+    auto dispatch_deltaSoftplus = [&](auto kIsEvenLen_, auto kIsVariableB_, auto kIsVariableC_) {
+        if (params.delta_softplus) {
+            dispatch_hasZ(kIsEvenLen_, kIsVariableB_, kIsVariableC_, std::true_type{});
+        } else {
+            dispatch_hasZ(kIsEvenLen_, kIsVariableB_, kIsVariableC_, std::false_type{});
+        }
+    };
+    auto dispatch_variableC = [&](auto kIsEvenLen_, auto kIsVariableB_) {
+        if (params.is_variable_C) {
+            dispatch_deltaSoftplus(kIsEvenLen_, kIsVariableB_, std::true_type{});
+        } else {
+            dispatch_deltaSoftplus(kIsEvenLen_, kIsVariableB_, std::false_type{});
+        }
+    };
+    auto dispatch_variableB = [&](auto kIsEvenLen_) {
+        if (params.is_variable_B) {
+            dispatch_variableC(kIsEvenLen_, std::true_type{});
+        } else {
+            dispatch_variableC(kIsEvenLen_, std::false_type{});
+        }
+    };
+    if (params.seqlen % (kNThreads * kNItems) == 0) {
+        dispatch_variableB(std::true_type{});
+    } else {
+        dispatch_variableB(std::false_type{});
+    }
 }
 
 template<typename input_t, typename weight_t>
