@@ -4,3 +4,5 @@ build/
 **.so
 *.hip
 *_hip.*
+selective_scan_cuda.cp312-win_amd64.pyd
+build_mamba_ext.log
